@@ -1,0 +1,10 @@
+Title:
+Life Sciences Research Paper Summarization & Hypothesis Generator Problem Statement:
+difficult to stay current and formulate novel hypotheses.Manualliterature reviews are time-intensive
+Researchers in life sciences face an overwhelming volume of new publications daily, making it
+and may miss relevant connections, A generative Al agent that summarizes recent papers, extracts key findings, and proposes hypotheses by integrating multiple sources can accelerate research workflows.
+Data Requirements:
+Access to PubMed API for paper abstracts and metadata, sample full-textpapers (open access), user authentication data.
+(Feel free to generate synthetic data as wellfrom the provided access)Expected Output:
+A web application featuring multi-agent LLM summarization and hypothesis generation, clean UXfor topic input and result exploration, multiple APl integrations, user management, documentation detailing data sources and architecture, test casesfor summarization accuracy and Ulcomponents, and metrics on summarization quality and hypothesis novelty.
+Be creative to go beyond as you solve the above needs
