@@ -1,0 +1,29 @@
+[
+  {
+    "productName": "Hand Bag",
+    "brand": "Lavi",
+    "category": "Fashion",
+    "features": "FeaLates, leather, stylish",
+    "channel": "Shopify",
+    "tone": "Professional",
+    "language": "English (US)"
+  },
+  {
+    "productName": "Hand Watch",
+    "brand": "Titan",
+    "category": "Fashion",
+    "features": "Amoled, Digital, leather, stylish",
+    "channel": "Shopify",
+    "tone": "Professional",
+    "language": "English (US)"
+  },
+  {
+    "productName": "Grenade",
+    "brand": "AK",
+    "category": "Explosive",
+    "features": "Quick, 200 mtr range",
+    "channel": "Shopify",
+    "tone": "Professional",
+    "language": "English (US)"
+  }
+]
