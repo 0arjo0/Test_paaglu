@@ -1,0 +1,14 @@
+[
+  {
+    "username": "admin",
+    "password": "password123",
+    "name": "Admin User",
+    "storeConnected": true,
+    "storeUrl": "sam-ai-demo.myshopify.com"
+  },
+  {
+    "username": "demo",
+    "password": "demo",
+    "name": "Demo User"
+  }
+]
