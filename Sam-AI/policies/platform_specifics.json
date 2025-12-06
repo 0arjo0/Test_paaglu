@@ -1,0 +1,49 @@
+{
+  "Amazon": [
+    "Title must not contain promotional phrases like 'Free Shipping', 'Best Seller', or 'Hot Item'.",
+    "Title length must not exceed 200 characters.",
+    "Bullet points (Features) should be sentence-cased and informative.",
+    "Do not use HTML tags in the Title.",
+    "Main image requirements (white background) should be noted in strategy."
+  ],
+  "Shopify": [
+    "Title should be SEO-friendly, ideally under 70 characters to prevent truncation in search results.",
+    "Description should use H2 tags for section headers to improve readability.",
+    "Focus on brand voice and storytelling rather than just specs."
+  ],
+  "Etsy": [
+    "Title should include descriptive keywords at the beginning (Front-loading).",
+    "Focus on 'handmade', 'vintage', 'custom', or 'gift' aspects if applicable.",
+    "Tone should be personal, human, and community-focused."
+  ],
+  "Instagram Shop": [
+    "Captions should be engaging and concise.",
+    "Include 5-30 relevant hashtags at the very bottom of the post.",
+    "Do not include non-clickable URLs in the caption body.",
+    "Focus on visual aesthetics and lifestyle benefits."
+  ],
+  "Google Shopping": [
+    "Title must be accurate and describe the physical product (Brand + Gender + Product Type + Color + Size).",
+    "No promotional text ('Buy now', 'Sale') in the title.",
+    "Avoid block capitals and gimmicky punctuation."
+  ],
+  "Walmart Marketplace": [
+    "Title should be 50-75 characters for best optimization.",
+    "Description should be professional and include keywords naturally.",
+    "Do not reference competitors."
+  ],
+  "Email Newsletter": [
+    "Subject line (Title) must be catchy, short, and urgency-driven if needed.",
+    "Body text should be personal, direct, and have a clear Call to Action (CTA)."
+  ],
+  "Landing Page": [
+    "Focus heavily on conversion, benefits, and social proof.",
+    "Use persuasive, action-oriented language.",
+    "Clear separation between headlines and body copy."
+  ],
+  "Default": [
+    "Ensure clarity and correct grammar.",
+    "Maintain a consistent tone suitable for general e-commerce.",
+    "Focus on user benefits."
+  ]
+}

@@ -1,0 +1,7 @@
+1. TRUTH IN ADVERTISING: Claims must be truthful and substantiated. Do not make medical claims (e.g., "cures cancer", "treats anxiety", "heals instantly") unless the product is a verified medical device or drug.
+2. RESTRICTED PRODUCTS: Do not generate content for illegal items, weapons, explosives, drug paraphernalia, or adult-only content that violates general safety guidelines.
+3. OFFENSIVE CONTENT: Avoid hate speech, discrimination, violence, or sexually explicit language.
+4. KEYWORD STUFFING: Do not overuse keywords to the point where readability is degraded. The text must sound natural to a human reader.
+5. FORMATTING: Do not use ALL CAPS for large blocks of text or titles, as this is considered "shouting" and is often banned by platforms.
+6. PRICING & CONTACT INFO: Do not include specific prices (as they change), email addresses, phone numbers, or physical addresses in the product description.
+7. INTELLECTUAL PROPERTY: Do not claim affiliation with major brands (e.g., "Better than Nike") unless explicitly stated in the input brand field.
