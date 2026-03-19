@@ -1,0 +1,21 @@
+Title:
+
+DevOps Incident Response Summarization Agent
+
+Problem Statement:
+
+DevOps teams handle numerous incident reports and post-mortems, which are often lengthy and inconsistent in format. Extracting actionable insights and root causes from these documents is time-intensive, delaying resolution and learning. A generative Al agent that summarizes incidents, highlights critical actions taken, and recommends preventive measures can streamline incident management. This improves team responsiveness and knowledge retention, reducing incident recurrence.
+
+Data Requirements:
+
+Incident reports, alert logs, chat transcripts from communication latforms like Slack or email.
+
+Post-mortem documents and resolution timelines. Metadata including timestamps, severity levels, and aGected services. Data anonymized to protect sensitive information.
+
+(Feel free to generate synthetic data as well from the provided access)
+
+Expected Output:
+
+The solution outputs incident summaries in structured text formats, including sections for problem description, root cause analysis, actions taken, and recommendations. Summaries should be concise (approx. 300 words) and suitable for distribution in team newsletters or dashboards. Export options include PDF and markdown formats.
+
+Be creative to go beyond as you solve the above needs
