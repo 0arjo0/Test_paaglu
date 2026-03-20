@@ -1,0 +1,1274 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║          SafeRoute AI — Nighttime Transit Safety Platform        ║
+║          IWD Special · RAG-Powered · LangGraph Agent             ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Based on the original DevOps Summarizer template.
+Removes pyttsx3 / voice assistant entirely.
+Adds: interactive Folium map · safety-weighted routing · dark/light toggle
+
+Run:
+    streamlit run saferoute_streamlit.py
+"""
+
+# ─────────────────────────────────────────────────────────────────
+# IMPORTS
+# ─────────────────────────────────────────────────────────────────
+import streamlit as st
+import streamlit.components.v1 as components
+
+from typing import TypedDict, List, Union, Optional
+import os, json, math, tempfile, time, re, random
+
+import httpx
+import pandas as pd
+
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_classic.chains import RetrievalQA
+from langgraph.graph import StateGraph, START, END
+from pdfminer.high_level import extract_text
+
+try:
+    import folium
+    from folium import plugins as folium_plugins
+    FOLIUM_OK = True
+except ImportError:
+    FOLIUM_OK = False
+
+# ─────────────────────────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="SafeRoute AI",
+    page_icon="🌙",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ─────────────────────────────────────────────────────────────────
+# HTTPX CLIENT  (mirrors original — SSL verify=False for corp proxy)
+# ─────────────────────────────────────────────────────────────────
+client = httpx.Client(verify=False)
+
+# ─────────────────────────────────────────────────────────────────
+# THEME  (dark / light)
+# ─────────────────────────────────────────────────────────────────
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = True
+
+def get_theme():
+    return "dark" if st.session_state.dark_mode else "light"
+
+def inject_css():
+    dark = st.session_state.dark_mode
+    if dark:
+        bg          = "#07111f"
+        bg2         = "#0c1929"
+        panel       = "#111f30"
+        panel2      = "#192840"
+        border      = "rgba(79,195,247,0.13)"
+        text        = "#e2eef8"
+        text2       = "#7aadca"
+        accent      = "#4fc3f7"
+        green       = "#69f0ae"
+        red         = "#ff5252"
+        orange      = "#ffab40"
+        input_bg    = "#0c1929"
+        chat_user   = "#1a3a5c"
+        chat_ai     = "#0f2e1a"
+        sidebar_bg  = "#080f1a"
+    else:
+        bg          = "#f0f5fa"
+        bg2         = "#e4ecf5"
+        panel       = "#ffffff"
+        panel2      = "#f5f8fc"
+        border      = "rgba(30,100,160,0.14)"
+        text        = "#0d1f30"
+        text2       = "#3a6885"
+        accent      = "#0277bd"
+        green       = "#1b5e20"
+        red         = "#b71c1c"
+        orange      = "#bf360c"
+        input_bg    = "#e4ecf5"
+        chat_user   = "#bbdefb"
+        chat_ai     = "#c8e6c9"
+        sidebar_bg  = "#e0eaf5"
+
+    st.markdown(f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=Outfit:wght@300;400;500;600&display=swap');
+
+    /* ── Root ── */
+    html, body, [data-testid="stAppViewContainer"] {{
+        background-color: {bg} !important;
+        color: {text} !important;
+        font-family: 'Outfit', sans-serif !important;
+    }}
+    [data-testid="stSidebar"] {{
+        background-color: {sidebar_bg} !important;
+        border-right: 1px solid {border} !important;
+    }}
+    [data-testid="stSidebar"] * {{ color: {text} !important; }}
+
+    /* ── Main container padding ── */
+    .block-container {{ padding-top: 1.2rem !important; }}
+
+    /* ── Headings ── */
+    h1, h2, h3 {{
+        font-family: 'Syne', sans-serif !important;
+        color: {text} !important;
+    }}
+    .page-title {{
+        font-family: 'Syne', sans-serif;
+        font-size: 2rem;
+        font-weight: 800;
+        color: {accent};
+        letter-spacing: -0.5px;
+        margin-bottom: 0.2rem;
+    }}
+    .page-sub {{
+        font-size: 0.875rem;
+        color: {text2};
+        margin-bottom: 1.5rem;
+    }}
+
+    /* ── Cards ── */
+    .sr-card {{
+        background: {panel};
+        border: 1px solid {border};
+        border-radius: 16px;
+        padding: 1.3rem 1.5rem;
+        margin-bottom: 1rem;
+    }}
+    .sr-card-title {{
+        font-family: 'Syne', sans-serif;
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: {text};
+        margin-bottom: 0.5rem;
+    }}
+
+    /* ── Chat bubbles ── */
+    .chat-scroll {{
+        max-height: 420px;
+        overflow-y: auto;
+        padding: 8px 4px;
+        margin-bottom: 0.5rem;
+    }}
+    .bubble-wrap {{ margin: 6px 0; display: flex; }}
+    .bubble-wrap.user {{ justify-content: flex-end; }}
+    .bubble-wrap.ai   {{ justify-content: flex-start; }}
+    .bubble {{
+        max-width: 78%;
+        padding: 10px 15px;
+        border-radius: 12px;
+        font-size: 0.875rem;
+        line-height: 1.6;
+    }}
+    .bubble.user {{ background: {chat_user}; color: {text}; border-bottom-right-radius: 3px; }}
+    .bubble.ai   {{ background: {chat_ai};  color: {text}; border-bottom-left-radius: 3px;  }}
+    .bubble strong {{ color: {accent}; }}
+    .bubble-label {{
+        font-size: 0.7rem;
+        color: {text2};
+        margin-bottom: 2px;
+        font-weight: 600;
+        letter-spacing: 0.4px;
+    }}
+
+    /* ── Metric tiles ── */
+    .metric-row {{ display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 1rem; }}
+    .metric-tile {{
+        background: {panel};
+        border: 1px solid {border};
+        border-radius: 12px;
+        padding: 1rem 1.2rem;
+        flex: 1;
+        min-width: 120px;
+    }}
+    .metric-val {{
+        font-family: 'Syne', sans-serif;
+        font-size: 1.6rem;
+        font-weight: 800;
+        color: {accent};
+    }}
+    .metric-lbl {{ font-size: 0.75rem; color: {text2}; margin-top: 2px; }}
+
+    /* ── Safety badge ── */
+    .badge {{
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-right: 4px;
+    }}
+    .badge-safe    {{ background: rgba(105,240,174,0.15); color: {green}; }}
+    .badge-caution {{ background: rgba(255,171,64,0.15);  color: {orange}; }}
+    .badge-danger  {{ background: rgba(255,82,82,0.15);   color: {red}; }}
+    .badge-info    {{ background: rgba(79,195,247,0.13);  color: {accent}; }}
+
+    /* ── Route option card ── */
+    .route-card {{
+        background: {panel2};
+        border: 1px solid {border};
+        border-radius: 12px;
+        padding: 1rem 1.2rem;
+        margin-bottom: 0.8rem;
+        cursor: pointer;
+        transition: border-color 0.2s;
+    }}
+    .route-card:hover {{ border-color: {accent}; }}
+    .route-card.selected {{ border: 2px solid {accent}; }}
+    .route-name {{
+        font-family: 'Syne', sans-serif;
+        font-weight: 700;
+        font-size: 0.95rem;
+        color: {text};
+    }}
+    .route-meta {{ font-size: 0.78rem; color: {text2}; margin-top: 3px; }}
+    .sbar {{ height: 4px; background: {bg2}; border-radius: 2px; margin-top: 6px; }}
+    .sbar-fill {{ height: 100%; border-radius: 2px; }}
+
+    /* ── Safety score big ── */
+    .score-big {{
+        font-family: 'Syne', sans-serif;
+        font-size: 1.6rem;
+        font-weight: 800;
+    }}
+    .score-safe   {{ color: {green}; }}
+    .score-caution{{ color: {orange}; }}
+    .score-danger {{ color: {red}; }}
+
+    /* ── Step pills ── */
+    .step-pill {{
+        display: inline-block;
+        background: {panel};
+        border: 1px solid {border};
+        border-radius: 20px;
+        padding: 4px 12px;
+        font-size: 0.78rem;
+        color: {accent};
+        margin: 2px 3px;
+        font-weight: 500;
+    }}
+
+    /* ── File uploader + inputs ── */
+    [data-testid="stFileUploader"] {{
+        background: {panel} !important;
+        border: 2px dashed {border} !important;
+        border-radius: 12px !important;
+    }}
+    .stSelectbox > div, .stTextInput > div > div > input,
+    .stTextArea textarea, .stNumberInput > div {{
+        background-color: {input_bg} !important;
+        color: {text} !important;
+        border-color: {border} !important;
+        border-radius: 9px !important;
+    }}
+    .stButton > button {{
+        background-color: {accent} !important;
+        color: {bg} !important;
+        font-family: 'Syne', sans-serif !important;
+        font-weight: 700 !important;
+        border: none !important;
+        border-radius: 9px !important;
+        padding: 0.45rem 1.4rem !important;
+        transition: filter 0.2s !important;
+    }}
+    .stButton > button:hover {{ filter: brightness(1.1) !important; }}
+
+    /* spinner */
+    .stSpinner > div {{ border-top-color: {accent} !important; }}
+
+    /* divider */
+    hr {{ border-color: {border} !important; }}
+
+    /* tabs */
+    .stTabs [data-baseweb="tab-list"] {{
+        background: {bg2} !important;
+        border-radius: 10px !important;
+        padding: 4px !important;
+        gap: 4px !important;
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        background: transparent !important;
+        border-radius: 7px !important;
+        color: {text2} !important;
+        font-family: 'Outfit', sans-serif !important;
+    }}
+    .stTabs [aria-selected="true"] {{
+        background: {panel} !important;
+        color: {text} !important;
+    }}
+
+    /* toggle label */
+    .theme-label {{
+        font-size: 0.78rem;
+        color: {text2};
+        font-weight: 600;
+    }}
+
+    /* scrollbar */
+    ::-webkit-scrollbar {{ width: 5px; }}
+    ::-webkit-scrollbar-track {{ background: transparent; }}
+    ::-webkit-scrollbar-thumb {{ background: {border}; border-radius: 3px; }}
+    </style>
+    """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────
+# SYSTEM PROMPT  (from original — adapted for transit safety)
+# ─────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """
+You are SafeRoute AI — an expert nighttime transit safety assistant powered by RAG.
+
+Your role is to analyze uploaded transit data (CSV, XLSX, PDF, plain-text) containing:
+- Stop details: name, location (lat/lng), safety metrics
+- Route definitions: stop sequences, type, night operations
+- CCTV coverage: camera counts, operational status
+
+OBJECTIVES:
+1. Answer user questions about transit safety using ONLY the retrieved document context
+2. Recommend safe routes between two stops when asked
+3. Explain safety scores and risk factors clearly
+4. Never hallucinate — if data is missing say "Information not available in uploaded data"
+
+OUTPUT STYLE:
+- Clear, professional, concise (≤ 300 words unless route details needed)
+- Use **bold** for stop names, scores, and critical info
+- Use bullet points for lists of recommendations or stops
+- Always cite the source data when referencing a score or fact
+
+SAFETY RULES:
+- Do not fabricate route timings or scores
+- If asked about a stop not in the data, say so explicitly
+
+ROUTE RECOMMENDATION FORMAT (when asked):
+## Recommended Route
+**From:** <origin> → **To:** <destination>
+**Safety Score:** <score>/100
+**Stop Sequence:** Stop A → Stop B → Stop C
+**Key Risks:** <any incidents or low-score stops>
+**Recommendation:** <1–2 sentences>
+"""
+
+# ─────────────────────────────────────────────────────────────────
+# SESSION STATE INIT
+# ─────────────────────────────────────────────────────────────────
+def init_session():
+    if "messages" not in st.session_state:
+        st.session_state.messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    if "rag_chain"      not in st.session_state: st.session_state.rag_chain      = None
+    if "rag_ready"      not in st.session_state: st.session_state.rag_ready      = False
+    if "expecting_file" not in st.session_state: st.session_state.expecting_file = False
+    if "stops_df"       not in st.session_state: st.session_state.stops_df       = None
+    if "routes_df"      not in st.session_state: st.session_state.routes_df      = None
+    if "incidents_df"   not in st.session_state: st.session_state.stops_df       = None
+    if "selected_route_idx" not in st.session_state: st.session_state.selected_route_idx = 0
+    if "computed_routes"    not in st.session_state: st.session_state.computed_routes    = []
+    if "plan_origin"        not in st.session_state: st.session_state.plan_origin        = None
+    if "plan_dest"          not in st.session_state: st.session_state.plan_dest          = None
+
+init_session()
+
+# ─────────────────────────────────────────────────────────────────
+# LLM / EMBEDDING FACTORY  (mirrors original base_url pattern)
+# ─────────────────────────────────────────────────────────────────
+API_BASE = os.getenv("OPENAI_API_BASE", "https://genailab.tcs.in")
+API_KEY  = os.getenv("OPENAI_API_KEY",  "sk-NSv6u2rCE44tzwp8WhMvLw")
+CHAT_MODEL   = os.getenv("CHAT_MODEL",      "azure/genailab-maas-gpt-35-turbo")
+EMBED_MODEL  = os.getenv("EMBED_MODEL",     "azure/genailab-maas-text-embedding-3-large")
+CHROMA_DIR   = os.getenv("CHROMA_DIR",      "./chroma_saferoute")
+
+def make_llm():
+    return ChatOpenAI(
+        base_url   = API_BASE,
+        model      = CHAT_MODEL,
+        api_key    = API_KEY,
+        http_client= client,
+        temperature= 0.2,
+    )
+
+def make_embeddings():
+    return OpenAIEmbeddings(
+        base_url   = API_BASE,
+        model      = EMBED_MODEL,
+        api_key    = API_KEY,
+        http_client= client,
+    )
+
+# ─────────────────────────────────────────────────────────────────
+# SAFETY SCORING
+# ─────────────────────────────────────────────────────────────────
+def calc_score(row: dict) -> int:
+    """Weighted safety score from stop attributes (0–100)."""
+    lighting  = float(row.get("lighting_score",  row.get("lighting",  50)) or 50)
+    footfall  = float(row.get("footfall_score",  row.get("footfall",  50)) or 50)
+    cctv      = float(row.get("cctv_score",      row.get("cctv",      50)) or 50)
+    incidents = float(row.get("incident_count",  row.get("incidents",  0)) or  0)
+    isolation = float(row.get("isolation_score", row.get("isolation",  50)) or 50)
+    emergency = float(row.get("emergency_access",row.get("emergency",  50)) or 50)
+    inc_score = max(0.0, 100.0 - incidents * 2.0)
+    iso_score = 100.0 - isolation
+    return round(
+        lighting  * 0.20 +
+        footfall  * 0.18 +
+        cctv      * 0.22 +
+        inc_score * 0.20 +
+        iso_score * 0.12 +
+        emergency * 0.08
+    )
+
+def tier(score: int) -> str:
+    if score >= 70: return "safe"
+    if score >= 45: return "caution"
+    return "danger"
+
+def tier_color(t: str) -> str:
+    return {"safe": "#69f0ae", "caution": "#ffab40", "danger": "#ff5252"}.get(t, "#7aadca")
+
+def tier_badge(score: int) -> str:
+    t = tier(score)
+    cls = f"badge-{t}"
+    label = t.capitalize()
+    return f'<span class="badge {cls}">{label}</span>'
+
+# ─────────────────────────────────────────────────────────────────
+# SYNTHETIC DATA  (fallback + "load sample")
+# ─────────────────────────────────────────────────────────────────
+SAMPLE_STOPS = [
+    {"stop_id":"S01","stop_name":"Central Station",   "latitude":51.5074,"longitude":-0.1278,"zone":"City Centre","lighting_score":88,"footfall_score":92,"cctv_score":95,"incident_count":2, "isolation_score":10,"emergency_access":92},
+    {"stop_id":"S02","stop_name":"Northgate Hub",      "latitude":51.5300,"longitude":-0.1400,"zone":"North",      "lighting_score":72,"footfall_score":75,"cctv_score":80,"incident_count":8, "isolation_score":25,"emergency_access":78},
+    {"stop_id":"S03","stop_name":"Market Square",      "latitude":51.5100,"longitude":-0.0900,"zone":"City Centre","lighting_score":80,"footfall_score":85,"cctv_score":78,"incident_count":5, "isolation_score":15,"emergency_access":85},
+    {"stop_id":"S04","stop_name":"University Campus",  "latitude":51.5200,"longitude":-0.1700,"zone":"West",       "lighting_score":65,"footfall_score":55,"cctv_score":70,"incident_count":12,"isolation_score":35,"emergency_access":72},
+    {"stop_id":"S05","stop_name":"City Hospital",      "latitude":51.5000,"longitude":-0.1000,"zone":"South",      "lighting_score":90,"footfall_score":78,"cctv_score":92,"incident_count":3, "isolation_score":12,"emergency_access":98},
+    {"stop_id":"S06","stop_name":"Riverside Gardens",  "latitude":51.4900,"longitude":-0.1100,"zone":"South",      "lighting_score":42,"footfall_score":28,"cctv_score":45,"incident_count":22,"isolation_score":60,"emergency_access":50},
+    {"stop_id":"S07","stop_name":"East Park Estate",   "latitude":51.5200,"longitude":-0.0600,"zone":"East",       "lighting_score":35,"footfall_score":22,"cctv_score":30,"incident_count":35,"isolation_score":72,"emergency_access":40},
+    {"stop_id":"S08","stop_name":"Tech Park South",    "latitude":51.4900,"longitude":-0.1500,"zone":"South",      "lighting_score":55,"footfall_score":40,"cctv_score":62,"incident_count":18,"isolation_score":48,"emergency_access":60},
+    {"stop_id":"S09","stop_name":"Old Town Quarter",   "latitude":51.5100,"longitude":-0.1300,"zone":"City Centre","lighting_score":60,"footfall_score":50,"cctv_score":55,"incident_count":20,"isolation_score":42,"emergency_access":65},
+    {"stop_id":"S10","stop_name":"Airport Terminal",   "latitude":51.4700,"longitude":-0.4600,"zone":"West",       "lighting_score":95,"footfall_score":88,"cctv_score":98,"incident_count":1, "isolation_score":8, "emergency_access":95},
+    {"stop_id":"S11","stop_name":"Hackney Wick",       "latitude":51.5400,"longitude":-0.0200,"zone":"East",       "lighting_score":38,"footfall_score":18,"cctv_score":28,"incident_count":41,"isolation_score":78,"emergency_access":35},
+    {"stop_id":"S12","stop_name":"Canary Wharf",       "latitude":51.5000,"longitude":-0.0200,"zone":"East",       "lighting_score":85,"footfall_score":82,"cctv_score":90,"incident_count":4, "isolation_score":14,"emergency_access":88},
+    {"stop_id":"S13","stop_name":"Brixton Market",     "latitude":51.4600,"longitude":-0.1100,"zone":"South",      "lighting_score":58,"footfall_score":62,"cctv_score":65,"incident_count":24,"isolation_score":38,"emergency_access":62},
+    {"stop_id":"S14","stop_name":"Kings Cross",        "latitude":51.5300,"longitude":-0.1200,"zone":"North",      "lighting_score":92,"footfall_score":96,"cctv_score":95,"incident_count":6, "isolation_score":8, "emergency_access":90},
+    {"stop_id":"S15","stop_name":"Peckham Bus Garage", "latitude":51.4700,"longitude":-0.0700,"zone":"South",      "lighting_score":44,"footfall_score":32,"cctv_score":38,"incident_count":30,"isolation_score":65,"emergency_access":48},
+    {"stop_id":"S16","stop_name":"Waterloo Station",   "latitude":51.5036,"longitude":-0.1143,"zone":"South",      "lighting_score":91,"footfall_score":94,"cctv_score":96,"incident_count":3, "isolation_score":9, "emergency_access":93},
+    {"stop_id":"S17","stop_name":"Hammersmith",        "latitude":51.4927,"longitude":-0.2232,"zone":"West",       "lighting_score":78,"footfall_score":72,"cctv_score":75,"incident_count":10,"isolation_score":28,"emergency_access":74},
+]
+SAMPLE_ROUTES = [
+    {"route_id":"R01","route_name":"City Express",    "route_type":"Bus",        "stops_sequence":"S01-S03-S14-S02","base_time_min":22,"night_penalty":1.1, "operates_night":True},
+    {"route_id":"R02","route_name":"Southbound Safe", "route_type":"Underground","stops_sequence":"S01-S16-S05",    "base_time_min":18,"night_penalty":1.05,"operates_night":True},
+    {"route_id":"R03","route_name":"East Connect",    "route_type":"Bus",        "stops_sequence":"S01-S03-S12-S07","base_time_min":35,"night_penalty":1.3, "operates_night":True},
+    {"route_id":"R04","route_name":"Night Owl N38",   "route_type":"Night Bus",  "stops_sequence":"S14-S04-S08-S06","base_time_min":40,"night_penalty":1.5, "operates_night":True},
+    {"route_id":"R05","route_name":"West Ring",       "route_type":"Bus",        "stops_sequence":"S01-S04-S10",    "base_time_min":55,"night_penalty":1.2, "operates_night":True},
+    {"route_id":"R06","route_name":"Victoria Line",   "route_type":"Underground","stops_sequence":"S01-S16-S14",    "base_time_min":14,"night_penalty":1.0, "operates_night":True},
+    {"route_id":"R07","route_name":"East Overground", "route_type":"Overground", "stops_sequence":"S14-S12-S07-S11","base_time_min":28,"night_penalty":1.15,"operates_night":True},
+    {"route_id":"R08","route_name":"South Circle",    "route_type":"Bus",        "stops_sequence":"S05-S13-S15-S06","base_time_min":32,"night_penalty":1.35,"operates_night":False},
+]
+SAMPLE_INCIDENTS = [
+    {"incident_id":"I001","stop_id":"S07","incident_type":"Harassment",    "time_reported":"22:14","severity":"High",  "description":"Verbal harassment at bus shelter by lone female rider"},
+    {"incident_id":"I002","stop_id":"S11","incident_type":"Assault",       "time_reported":"21:50","severity":"High",  "description":"Physical altercation near platform entrance"},
+    {"incident_id":"I003","stop_id":"S06","incident_type":"Lighting Fail", "time_reported":"20:30","severity":"Medium","description":"Three streetlights out on approach path"},
+    {"incident_id":"I004","stop_id":"S15","incident_type":"Harassment",    "time_reported":"23:05","severity":"Medium","description":"Intimidating group behaviour near stop"},
+    {"incident_id":"I005","stop_id":"S09","incident_type":"Theft",         "time_reported":"21:20","severity":"Low",   "description":"Phone snatching near stop entrance"},
+    {"incident_id":"I006","stop_id":"S04","incident_type":"CCTV Offline",  "time_reported":"18:00","severity":"Medium","description":"Camera 4B offline — maintenance raised"},
+    {"incident_id":"I007","stop_id":"S08","incident_type":"Harassment",    "time_reported":"22:40","severity":"High",  "description":"Group causing distress to solo rider"},
+]
+
+def load_sample_data():
+    stops_df = pd.DataFrame(SAMPLE_STOPS)
+    stops_df["score"] = stops_df.apply(lambda r: calc_score(r.to_dict()), axis=1)
+    stops_df["tier"]  = stops_df["score"].apply(tier)
+    st.session_state.stops_df     = stops_df
+    st.session_state.routes_df    = pd.DataFrame(SAMPLE_ROUTES)
+    st.session_state.incidents_df = pd.DataFrame(SAMPLE_INCIDENTS)
+    # Build RAG text from sample
+    text_blob = _dataframes_to_text(stops_df, pd.DataFrame(SAMPLE_ROUTES), pd.DataFrame(SAMPLE_INCIDENTS))
+    _build_rag_from_text(text_blob)
+
+# ─────────────────────────────────────────────────────────────────
+# DATA PARSING
+# ─────────────────────────────────────────────────────────────────
+def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    return df
+
+def _parse_stops(df: pd.DataFrame) -> pd.DataFrame:
+    df = _normalize_cols(df)
+    # flexible column aliases
+    aliases = {
+        "stop_id":        ["stop_id","id","stopid"],
+        "stop_name":      ["stop_name","name","stopname","station"],
+        "latitude":       ["latitude","lat"],
+        "longitude":      ["longitude","lng","lon"],
+        "zone":           ["zone","area","district"],
+        "lighting_score": ["lighting_score","lighting","lux","light"],
+        "footfall_score": ["footfall_score","footfall","crowd","pedestrian"],
+        "cctv_score":     ["cctv_score","cctv","camera","cameras"],
+        "incident_count": ["incident_count","incidents","crimes","reports"],
+        "isolation_score":["isolation_score","isolation","isolated"],
+        "emergency_access":["emergency_access","emergency","ems"],
+    }
+    for target, srcs in aliases.items():
+        if target not in df.columns:
+            for s in srcs:
+                if s in df.columns:
+                    df[target] = df[s]
+                    break
+        if target not in df.columns:
+            df[target] = 50 if "score" in target or target in ["lighting_score","footfall_score","cctv_score","isolation_score","emergency_access"] else (0 if target=="incident_count" else "Unknown")
+    df["score"] = df.apply(lambda r: calc_score(r.to_dict()), axis=1)
+    df["tier"]  = df["score"].apply(tier)
+    return df
+
+def _parse_routes(df: pd.DataFrame) -> pd.DataFrame:
+    df = _normalize_cols(df)
+    for col, default in [("route_id","R?"),("route_name","Route"),("route_type","Bus"),
+                         ("stops_sequence",""),("base_time_min",30),("night_penalty",1.2),("operates_night",True)]:
+        for alias in [col, col.replace("_",""), col.split("_")[0]]:
+            if alias in df.columns:
+                if col not in df.columns: df[col] = df[alias]
+                break
+        if col not in df.columns: df[col] = default
+    return df
+
+def _parse_incidents(df: pd.DataFrame) -> pd.DataFrame:
+    df = _normalize_cols(df)
+    for col, default in [("incident_id",""),("stop_id",""),("incident_type","Unknown"),
+                         ("time_reported",""),("severity","Low"),("description","")]:
+        if col not in df.columns:
+            for alias in [col, col.replace("_",""), col.split("_")[0]]:
+                if alias in df.columns: df[col] = df[alias]; break
+            else: df[col] = default
+    return df
+
+def _dataframes_to_text(stops_df, routes_df, incidents_df) -> str:
+    lines = ["=== TRANSIT STOPS ==="]
+    for _, r in stops_df.iterrows():
+        lines.append(f"Stop {r.get('stop_id','?')} '{r.get('stop_name','?')}' "
+                     f"zone={r.get('zone','?')} "
+                     f"safety_score={r.get('score', calc_score(r.to_dict()))} "
+                     f"lighting={r.get('lighting_score','?')} "
+                     f"footfall={r.get('footfall_score','?')} "
+                     f"cctv={r.get('cctv_score','?')} "
+                     f"incidents={r.get('incident_count','?')} "
+                     f"tier={r.get('tier', tier(int(r.get('score',50))))}")
+    lines.append("\n=== ROUTES ===")
+    for _, r in routes_df.iterrows():
+        lines.append(f"Route {r.get('route_id','?')} '{r.get('route_name','?')}' "
+                     f"type={r.get('route_type','?')} "
+                     f"stops={r.get('stops_sequence','?')} "
+                     f"time={r.get('base_time_min','?')}min "
+                     f"operates_night={r.get('operates_night','?')}")
+    lines.append("\n=== INCIDENTS ===")
+    for _, r in incidents_df.iterrows():
+        lines.append(f"Incident at stop {r.get('stop_id','?')}: "
+                     f"type={r.get('incident_type','?')} "
+                     f"severity={r.get('severity','?')} "
+                     f"time={r.get('time_reported','?')} "
+                     f"desc={r.get('description','?')}")
+    return "\n".join(lines)
+
+# ─────────────────────────────────────────────────────────────────
+# FILE PROCESSING
+# ─────────────────────────────────────────────────────────────────
+def process_uploaded_files(files: list):
+    """
+    Accept multiple uploaded files (CSV, XLSX, PDF, TXT).
+    Auto-detect type from column names or filename hints.
+    """
+    stops_frames, routes_frames, incident_frames, raw_texts = [], [], [], []
+
+    for f in files:
+        name = f.name.lower()
+        try:
+            # ── PDF ──────────────────────────────────────────────
+            if name.endswith(".pdf"):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(f.read())
+                    tmp_path = tmp.name
+                raw_texts.append(extract_text(tmp_path))
+                os.unlink(tmp_path)
+
+            # ── XLSX / XLS ───────────────────────────────────────
+            elif name.endswith((".xlsx", ".xls")):
+                xf = pd.ExcelFile(f)
+                for sheet in xf.sheet_names:
+                    df = xf.parse(sheet)
+                    _classify_and_store(df, sheet, stops_frames, routes_frames, incident_frames)
+
+            # ── CSV / TXT ────────────────────────────────────────
+            elif name.endswith((".csv", ".txt")):
+                try:
+                    df = pd.read_csv(f)
+                except Exception:
+                    f.seek(0)
+                    raw_texts.append(f.read().decode("utf-8", errors="replace"))
+                    continue
+                _classify_and_store(df, name, stops_frames, routes_frames, incident_frames)
+
+        except Exception as e:
+            st.warning(f"⚠ Could not parse {f.name}: {e}")
+
+    # Merge & store
+    if stops_frames:
+        merged = pd.concat(stops_frames, ignore_index=True).drop_duplicates()
+        st.session_state.stops_df = _parse_stops(merged)
+    if routes_frames:
+        merged = pd.concat(routes_frames, ignore_index=True).drop_duplicates()
+        st.session_state.routes_df = _parse_routes(merged)
+    if incident_frames:
+        merged = pd.concat(incident_frames, ignore_index=True).drop_duplicates()
+        st.session_state.incidents_df = _parse_incidents(merged)
+
+    # Build full RAG text
+    combined_text = "\n\n".join(raw_texts)
+    if st.session_state.stops_df is not None:
+        combined_text += "\n\n" + _dataframes_to_text(
+            st.session_state.stops_df,
+            st.session_state.routes_df if st.session_state.routes_df is not None else pd.DataFrame(),
+            st.session_state.incidents_df if "incidents_df" in st.session_state and st.session_state.incidents_df is not None else pd.DataFrame(),
+        )
+    if combined_text.strip():
+        _build_rag_from_text(combined_text)
+    elif st.session_state.stops_df is None:
+        st.error("No usable data found. Please check your file format and column names.")
+
+
+def _classify_and_store(df: pd.DataFrame, hint: str, stops_frames, routes_frames, incident_frames):
+    cols = set(c.lower().strip().replace(" ","_") for c in df.columns)
+    hint_l = hint.lower()
+    # Route hints
+    if any(x in hint_l for x in ["route","transit_routes"]) or \
+       any(x in cols for x in ["route_id","stops_sequence","route_name","night_penalty"]):
+        routes_frames.append(df)
+    # Incident hints
+    elif any(x in hint_l for x in ["incident","crime","report"]) or \
+         any(x in cols for x in ["incident_id","incident_type","severity"]):
+        incident_frames.append(df)
+    # Default → stops
+    else:
+        stops_frames.append(df)
+
+
+def _build_rag_from_text(text: str):
+    """Chunk → embed → vectorstore → RAG chain."""
+    with st.spinner("🔍 Building RAG index…"):
+        splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=200)
+        chunks   = splitter.split_text(text)
+        try:
+            embeddings = make_embeddings()
+            vectordb   = Chroma.from_texts(chunks, embeddings, persist_directory=CHROMA_DIR)
+            vectordb.persist()
+            retriever  = vectordb.as_retriever(search_kwargs={"k": 4})
+            llm        = make_llm()
+            chain      = RetrievalQA.from_chain_type(
+                llm=llm, retriever=retriever, return_source_documents=True
+            )
+            st.session_state.rag_chain = chain
+            st.session_state.rag_ready = True
+        except Exception as e:
+            # If API is unreachable, mark rag_ready anyway for UI; chat will use fallback
+            st.warning(f"⚠ RAG API unavailable ({e}). Running in offline demo mode.")
+            st.session_state.rag_chain = None
+            st.session_state.rag_ready = True   # data is loaded, just no live LLM
+
+
+# ─────────────────────────────────────────────────────────────────
+# ROUTING ENGINE
+# ─────────────────────────────────────────────────────────────────
+def compute_routes(origin_id: str, dest_id: str, safety_weight: float = 0.7) -> list:
+    """
+    Find all routes that contain both origin and dest (in order).
+    Score = safety_weight * avg_safety + (1-safety_weight) * speed_score
+    Returns list of dicts sorted best → worst.
+    """
+    stops_df   = st.session_state.stops_df
+    routes_df  = st.session_state.routes_df
+    incidents  = st.session_state.get("incidents_df", pd.DataFrame())
+
+    if stops_df is None or routes_df is None:
+        return []
+
+    stop_lookup = {r["stop_id"]: r for _, r in stops_df.iterrows()}
+    results = []
+
+    for _, route in routes_df.iterrows():
+        seq_raw = str(route.get("stops_sequence",""))
+        seq = [s.strip() for s in re.split(r"[-,;|→ ]+", seq_raw) if s.strip()]
+        try:
+            oi = seq.index(origin_id)
+            di = seq.index(dest_id)
+        except ValueError:
+            continue
+        if oi >= di:
+            continue
+
+        segment = seq[oi : di + 1]
+        seg_stops = [stop_lookup[s] for s in segment if s in stop_lookup]
+        if not seg_stops:
+            continue
+
+        scores = [int(s.get("score", calc_score(dict(s)))) for s in seg_stops]
+        avg_safety = sum(scores) / len(scores)
+        min_safety = min(scores)
+
+        # Incident penalty
+        if not incidents.empty:
+            inc_on_route = incidents[incidents["stop_id"].isin(segment)]
+            penalty = inc_on_route["severity"].map({"High":15,"Medium":8,"Low":3}).sum()
+        else:
+            penalty = 0
+
+        effective_safety = max(0, avg_safety - penalty)
+        base_time = float(route.get("base_time_min", 30))
+        night_pen = float(route.get("night_penalty",  1.2))
+        night_time = base_time * night_pen
+
+        # Speed score: inverse of time (scaled 0–100, assuming max 90 min)
+        speed_score = max(0, 100 - night_time * (100/90))
+        final = safety_weight * effective_safety + (1 - safety_weight) * speed_score
+
+        results.append({
+            "route":           route,
+            "segment":         segment,
+            "seg_stops":       seg_stops,
+            "scores":          scores,
+            "avg_safety":      round(effective_safety),
+            "min_safety":      round(min_safety),
+            "night_time":      round(night_time),
+            "base_time":       round(base_time),
+            "final_score":     round(final),
+            "tier":            tier(round(effective_safety)),
+            "route_type":      route.get("route_type","Bus"),
+            "route_name":      route.get("route_name","Route"),
+            "inc_on_route":    incidents[incidents["stop_id"].isin(segment)] if not incidents.empty else pd.DataFrame(),
+        })
+
+    results.sort(key=lambda x: x["final_score"], reverse=True)
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────
+# MAP RENDERING (Folium)
+# ─────────────────────────────────────────────────────────────────
+ROUTE_PALETTE = ["#4fc3f7", "#69f0ae", "#ffab40", "#ff5252", "#ce93d8", "#fff176"]
+
+def render_map(routes: list, selected_idx: int = 0) -> Optional[str]:
+    if not FOLIUM_OK:
+        return None
+    stops_df = st.session_state.stops_df
+    if stops_df is None or stops_df.empty:
+        return None
+
+    # Centre map on mean of all stops
+    lat_c = stops_df["latitude"].astype(float).mean()
+    lng_c = stops_df["longitude"].astype(float).mean()
+
+    dark = st.session_state.dark_mode
+    tiles = "CartoDB dark_matter" if dark else "CartoDB positron"
+    m = folium.Map(location=[lat_c, lng_c], zoom_start=11, tiles=tiles, prefer_canvas=True)
+
+    # ── Draw all stop markers ────────────────────────────────────
+    for _, s in stops_df.iterrows():
+        score_ = int(s.get("score", 50))
+        t      = str(s.get("tier","caution"))
+        clr    = tier_color(t)
+        lat_   = float(s.get("latitude", 0))
+        lng_   = float(s.get("longitude", 0))
+        name_  = str(s.get("stop_name","?"))
+        popup_html = f"""
+        <div style='font-family:sans-serif;min-width:160px'>
+          <b style='color:{clr}'>{name_}</b><br>
+          <span style='color:#666'>Zone: {s.get("zone","?")}</span><br>
+          Safety Score: <b style='color:{clr}'>{score_}</b>/100<br>
+          Lighting: {s.get("lighting_score","?")} · CCTV: {s.get("cctv_score","?")}<br>
+          Footfall: {s.get("footfall_score","?")} · Incidents: {s.get("incident_count","?")}
+        </div>"""
+        folium.CircleMarker(
+            location=[lat_, lng_],
+            radius=7,
+            color=clr,
+            fill=True,
+            fill_color=clr,
+            fill_opacity=0.75,
+            weight=2,
+            popup=folium.Popup(popup_html, max_width=220),
+            tooltip=f"{name_} ({score_})"
+        ).add_to(m)
+
+    # ── Draw route polylines ────────────────────────────────────
+    stop_latlng = {
+        row["stop_id"]: (float(row["latitude"]), float(row["longitude"]))
+        for _, row in stops_df.iterrows()
+        if "stop_id" in row and "latitude" in row
+    }
+
+    for i, rc in enumerate(routes):
+        coords = [stop_latlng[s] for s in rc["segment"] if s in stop_latlng]
+        if len(coords) < 2:
+            continue
+        color   = ROUTE_PALETTE[i % len(ROUTE_PALETTE)]
+        weight  = 6 if i == selected_idx else 3
+        opacity = 0.9 if i == selected_idx else 0.45
+        dash    = None if i == selected_idx else "6,6"
+        line_kw = dict(locations=coords, color=color, weight=weight,
+                       opacity=opacity, tooltip=f"{rc['route_name']} — Safety: {rc['avg_safety']}")
+        if dash:
+            line_kw["dash_array"] = dash
+        folium.PolyLine(**line_kw).add_to(m)
+
+        # Start / end markers for selected route
+        if i == selected_idx and coords:
+            folium.Marker(
+                coords[0],
+                icon=folium.DivIcon(html=f'<div style="background:{color};color:#000;font-weight:700;padding:3px 7px;border-radius:6px;font-size:11px;white-space:nowrap;">FROM</div>'),
+            ).add_to(m)
+            folium.Marker(
+                coords[-1],
+                icon=folium.DivIcon(html=f'<div style="background:{color};color:#000;font-weight:700;padding:3px 7px;border-radius:6px;font-size:11px;white-space:nowrap;">TO</div>'),
+            ).add_to(m)
+
+    return m._repr_html_()
+
+
+# ─────────────────────────────────────────────────────────────────
+# CHAT
+# ─────────────────────────────────────────────────────────────────
+RAG_KW = ["pdf","summarize","summarizer","document","extract","upload","file",
+          "route","stop","safety","incident","lighting","cctv","footfall","risk",
+          "score","dangerous","safe","recommend"]
+
+def render_chat_history():
+    visible = [m for m in st.session_state.messages if not isinstance(m, SystemMessage)][-10:]
+    html_parts = ['<div class="chat-scroll">']
+    for msg in visible:
+        if isinstance(msg, HumanMessage):
+            html_parts.append(f"""
+            <div class="bubble-wrap user">
+              <div><div class="bubble-label" style="text-align:right">YOU</div>
+              <div class="bubble user">{msg.content}</div></div>
+            </div>""")
+        elif isinstance(msg, AIMessage):
+            html_parts.append(f"""
+            <div class="bubble-wrap ai">
+              <div><div class="bubble-label">AI</div>
+              <div class="bubble ai">{msg.content}</div></div>
+            </div>""")
+    html_parts.append("</div>")
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
+
+def ask_rag(question: str) -> str:
+    if st.session_state.rag_chain is not None:
+        try:
+            result = st.session_state.rag_chain.invoke(question)
+            return result.get("result", "")
+        except Exception:
+            pass
+    # Offline fallback
+    return _offline_answer(question)
+
+def ask_chat(question: str) -> str:
+    try:
+        llm = make_llm()
+
+        class AgentState(TypedDict):
+            messages: List[Union[HumanMessage, AIMessage, SystemMessage]]
+
+        def node(state: AgentState) -> AgentState:
+            resp = llm.invoke(state["messages"])
+            state["messages"].append(AIMessage(content=resp.content))
+            return state
+
+        g = StateGraph(AgentState)
+        g.add_node("node1", node)
+        g.add_edge(START, "node1")
+        g.add_edge("node1", END)
+        agent  = g.compile()
+        result = agent.invoke({"messages": st.session_state.messages.copy()})
+        return result["messages"][-1].content
+    except Exception:
+        return _offline_answer(question)
+
+def _offline_answer(question: str) -> str:
+    """Deterministic fallback when no API is reachable."""
+    ql = question.lower()
+    stops_df = st.session_state.stops_df
+    if stops_df is None:
+        return "No data loaded yet. Please upload files or load the sample dataset first."
+
+    if any(w in ql for w in ["safest","safe stop","top stop"]):
+        top = stops_df.nlargest(3,"score")[["stop_name","score"]].values.tolist()
+        txt = ", ".join(f"**{n}** ({s})" for n,s in top)
+        return f"The safest stops in the loaded data are: {txt}."
+
+    if any(w in ql for w in ["dangerous","risk","worst","lowest"]):
+        bot = stops_df.nsmallest(3,"score")[["stop_name","score"]].values.tolist()
+        txt = ", ".join(f"**{n}** ({s})" for n,s in bot)
+        return f"The highest-risk stops are: {txt}. These have poor CCTV, lighting, or high incident counts."
+
+    if any(w in ql for w in ["score","calculat","formula","weight"]):
+        return ("Safety score = **0.22×CCTV + 0.20×Lighting + 0.18×Footfall + "
+                "0.20×(100−incidents×2) + 0.12×(100−isolation) + 0.08×Emergency**. "
+                "Scores ≥70 = Safe · 45–69 = Caution · <45 = High Risk.")
+
+    if "incident" in ql:
+        inc = st.session_state.get("incidents_df")
+        if inc is not None and not inc.empty:
+            hi = inc[inc["severity"]=="High"]
+            return (f"There are **{len(inc)} incidents** loaded. "
+                    f"**{len(hi)} high-severity** incidents. "
+                    f"Stops affected: {', '.join(inc['stop_id'].unique()[:5])}.")
+
+    avg = int(stops_df["score"].mean())
+    danger_cnt = int((stops_df["tier"]=="danger").sum())
+    return (f"Network overview: **{len(stops_df)} stops** loaded. "
+            f"Average safety score: **{avg}**. "
+            f"**{danger_cnt}** stops rated high-risk. "
+            f"Use the Trip Planner tab to explore route options.")
+
+
+# ─────────────────────────────────────────────────────────────────
+# ── UI LAYOUT ────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+inject_css()
+
+# ── Sidebar ─────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### 🌙 SafeRoute AI")
+    st.markdown('<p class="theme-label">Display Mode</p>', unsafe_allow_html=True)
+    tog_col1, tog_col2 = st.columns([1, 3])
+    with tog_col1:
+        mode_label = "🌙 Dark" if st.session_state.dark_mode else "☀️ Light"
+    with tog_col2:
+        if st.button("Toggle Theme", key="theme_btn", use_container_width=True):
+            st.session_state.dark_mode = not st.session_state.dark_mode
+            st.rerun()
+    st.markdown(f"**Current:** {mode_label}")
+    st.divider()
+
+    st.markdown("#### 📂 Upload Data")
+    st.markdown('<p style="font-size:0.78rem;color:var(--text2,#7aadca)">CSV · XLSX · PDF · TXT</p>', unsafe_allow_html=True)
+
+    uploaded_files = st.file_uploader(
+        "Drop files here",
+        type=["csv","xlsx","xls","pdf","txt"],
+        accept_multiple_files=True,
+        label_visibility="collapsed",
+    )
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Process Files", disabled=not uploaded_files, use_container_width=True):
+            process_uploaded_files(uploaded_files)
+            st.success(f"✓ {len(uploaded_files)} file(s) processed")
+            st.rerun()
+    with col_b:
+        if st.button("Sample Data", use_container_width=True):
+            load_sample_data()
+            st.success("✓ Sample data loaded")
+            st.rerun()
+
+    # Status
+    st.divider()
+    st.markdown("#### 📊 Data Status")
+    df_s = st.session_state.stops_df
+    df_r = st.session_state.routes_df
+    df_i = st.session_state.get("incidents_df")
+    st.markdown(f"- Stops: **{len(df_s) if df_s is not None else 0}**")
+    st.markdown(f"- Routes: **{len(df_r) if df_r is not None else 0}**")
+    st.markdown(f"- Incidents: **{len(df_i) if df_i is not None else 0}**")
+    rag_status = "🟢 Ready" if st.session_state.rag_ready else "🔴 Not built"
+    st.markdown(f"- RAG Index: **{rag_status}**")
+
+    st.divider()
+    if st.button("🗑 Reset Session", use_container_width=True):
+        for key in ["messages","rag_chain","rag_ready","stops_df","routes_df",
+                    "incidents_df","computed_routes","selected_route_idx",
+                    "plan_origin","plan_dest","expecting_file"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+# ── Main area ───────────────────────────────────────────────────
+st.markdown('<p class="page-title">🌙 SafeRoute AI</p>', unsafe_allow_html=True)
+st.markdown('<p class="page-sub">Nighttime Transit Safety Platform — IWD Special · RAG-Powered Routing</p>', unsafe_allow_html=True)
+
+tabs = st.tabs(["🗺 Trip Planner", "💬 AI Assistant", "📊 Dashboard", "🗄 Data Explorer"])
+
+# ════════════════════════════════════════════════════════════════
+# TAB 1 — TRIP PLANNER
+# ════════════════════════════════════════════════════════════════
+with tabs[0]:
+    stops_df = st.session_state.stops_df
+
+    if stops_df is None:
+        st.info("👈 Upload data files or click **Sample Data** in the sidebar to begin.")
+    else:
+        stop_options = dict(zip(stops_df["stop_name"], stops_df["stop_id"]))
+        stop_names   = list(stop_options.keys())
+
+        # ── Controls row ─────────────────────────────────────────
+        ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 2, 2])
+        with ctrl1:
+            origin_name = st.selectbox("🚏 From (Origin)", stop_names, index=0, key="sel_origin")
+        with ctrl2:
+            dest_opts   = [n for n in stop_names if n != origin_name]
+            dest_name   = st.selectbox("🎯 To (Destination)", dest_opts, index=min(1, len(dest_opts)-1), key="sel_dest")
+        with ctrl3:
+            dep_time    = st.time_input("🕙 Departure", value=None, key="dep_time")
+        with ctrl4:
+            rider_profile = st.selectbox("👤 Profile", ["Standard", "Solo Woman (Night)", "Elderly", "Young Person", "Disability"], index=1)
+
+        safety_weight = st.slider("⚖ Safety Priority (Speed ← → Safety)", 0, 100, 70, key="sw_slider") / 100.0
+
+        profile_mult = 1.3 if rider_profile != "Standard" else 1.0
+        adjusted_weight = min(1.0, safety_weight * profile_mult)
+
+        find_btn = st.button("🔍 Find Safe Routes", use_container_width=True, type="primary")
+
+        if find_btn:
+            origin_id = stop_options[origin_name]
+            dest_id   = stop_options[dest_name]
+            st.session_state.plan_origin = origin_id
+            st.session_state.plan_dest   = dest_id
+            routes = compute_routes(origin_id, dest_id, adjusted_weight)
+            st.session_state.computed_routes     = routes
+            st.session_state.selected_route_idx  = 0
+
+        routes = st.session_state.computed_routes
+
+        if routes:
+            st.divider()
+            map_col, panel_col = st.columns([3, 2])
+
+            # ── Route options panel ──────────────────────────────
+            with panel_col:
+                st.markdown("#### Route Options")
+                for i, rc in enumerate(routes[:3]):
+                    t   = rc["tier"]
+                    clr = tier_color(t)
+                    is_sel = (i == st.session_state.selected_route_idx)
+                    sel_border = f"border:2px solid {clr}" if is_sel else ""
+                    badge_html = tier_badge(rc["avg_safety"])
+                    sbar_clr   = clr
+                    sbar_pct   = rc["avg_safety"]
+
+                    # Stop sequence pills
+                    pills = "".join(
+                        f'<span class="step-pill">{stop_lookup.get(s, {}).get("stop_name", s) if (stop_lookup := {r["stop_id"]:r for _, r in stops_df.iterrows()}) else s}</span>'
+                        for s in rc["segment"]
+                    )
+
+                    route_labels = ["🏆 Safest Route", "⚖ Balanced Route", "⚡ Fastest Route"]
+                    label = route_labels[i] if i < len(route_labels) else f"Option {i+1}"
+
+                    st.markdown(f"""
+                    <div class="route-card" style="{sel_border}">
+                      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                        <div>
+                          <div class="route-name">{label}</div>
+                          <div class="route-meta">{rc['route_name']} · {rc['route_type']}</div>
+                        </div>
+                        <div class="score-big score-{t}">{rc['avg_safety']}</div>
+                      </div>
+                      <div class="sbar"><div class="sbar-fill" style="width:{sbar_pct}%;background:{sbar_clr}"></div></div>
+                      <div style="margin-top:8px">
+                        {badge_html}
+                        <span class="badge badge-info">🕐 {rc['night_time']} min</span>
+                        {'<span class="badge badge-danger">⚠ Incidents</span>' if not rc["inc_on_route"].empty else ''}
+                      </div>
+                      <div style="margin-top:8px">{pills}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    if st.button(f"Select Route {i+1}", key=f"sel_route_{i}", use_container_width=True):
+                        st.session_state.selected_route_idx = i
+                        st.rerun()
+
+                # Incidents on selected route
+                sel = routes[st.session_state.selected_route_idx]
+                if not sel["inc_on_route"].empty:
+                    st.markdown("**⚠ Active Incidents on This Route**")
+                    for _, inc in sel["inc_on_route"].iterrows():
+                        sev = str(inc.get("severity","Low"))
+                        sev_cls = "badge-danger" if sev=="High" else "badge-caution" if sev=="Medium" else "badge-safe"
+                        stop_name_i = stops_df[stops_df["stop_id"]==inc.get("stop_id","")]["stop_name"].values
+                        sn = stop_name_i[0] if len(stop_name_i) else inc.get("stop_id","?")
+                        st.markdown(f"""
+                        <div style="font-size:0.8rem;padding:7px 10px;background:rgba(255,82,82,0.07);border:1px solid rgba(255,82,82,0.2);border-radius:8px;margin-bottom:5px">
+                          <span class="badge {sev_cls}">{sev}</span>
+                          <b>{inc.get("incident_type","?")}</b> at {sn}
+                          [{inc.get("time_reported","?")}]<br>
+                          <span style="font-size:0.75rem;color:#aaa">{inc.get("description","")}</span>
+                        </div>""", unsafe_allow_html=True)
+
+            # ── Map ──────────────────────────────────────────────
+            with map_col:
+                if FOLIUM_OK:
+                    map_html = render_map(routes[:3], st.session_state.selected_route_idx)
+                    if map_html:
+                        components.html(map_html, height=500, scrolling=False)
+                    else:
+                        st.info("Map unavailable — missing lat/lng columns in data.")
+                else:
+                    # Fallback: simple text map
+                    st.info("📦 Install `folium` for the interactive map: `pip install folium`")
+                    sel = routes[st.session_state.selected_route_idx]
+                    stop_lookup2 = {r["stop_id"]: r["stop_name"] for _, r in stops_df.iterrows()}
+                    st.markdown("**Selected Route Stops:**")
+                    for sid in sel["segment"]:
+                        sn = stop_lookup2.get(sid, sid)
+                        row = stops_df[stops_df["stop_id"]==sid]
+                        if not row.empty:
+                            s_ = int(row.iloc[0].get("score",50))
+                            t_ = tier(s_)
+                            clr_ = tier_color(t_)
+                            st.markdown(f"→ **{sn}** — Score: <span style='color:{clr_}'>{s_}</span>", unsafe_allow_html=True)
+
+        elif find_btn:
+            st.warning("No direct routes found between these stops. Try different stops or check route data.")
+
+
+# ════════════════════════════════════════════════════════════════
+# TAB 2 — AI ASSISTANT (RAG CHAT)
+# ════════════════════════════════════════════════════════════════
+with tabs[1]:
+    st.markdown("#### 💬 SafeRoute AI Assistant")
+    st.markdown('<p class="page-sub">Ask anything about stops, routes, safety scores, or incidents. RAG-powered responses grounded in your uploaded data.</p>', unsafe_allow_html=True)
+
+    chat_col, src_col = st.columns([3, 1])
+
+    with src_col:
+        st.markdown("**📚 Quick Questions**")
+        quick_qs = [
+            "What are the safest stops?",
+            "Which stops are high risk?",
+            "How is the safety score calculated?",
+            "Which route is best for a solo woman?",
+            "What incidents happened tonight?",
+            "Recommend a route from Central Station to Airport Terminal",
+        ]
+        for q in quick_qs:
+            if st.button(q, key=f"qq_{q}", use_container_width=True):
+                st.session_state.messages.append(HumanMessage(content=q))
+                with st.spinner("Thinking…"):
+                    ans = ask_rag(q) if st.session_state.rag_ready else _offline_answer(q)
+                st.session_state.messages.append(AIMessage(content=ans))
+                st.rerun()
+
+    with chat_col:
+        render_chat_history()
+        prompt = st.chat_input("Ask about safety, routes, stops, incidents…")
+        if prompt:
+            st.session_state.messages.append(HumanMessage(content=prompt))
+            with st.spinner("Searching knowledge base…"):
+                if st.session_state.rag_ready:
+                    answer = ask_rag(prompt)
+                else:
+                    answer = ask_chat(prompt)
+            st.session_state.messages.append(AIMessage(content=answer))
+            st.rerun()
+
+        if not st.session_state.rag_ready:
+            st.info("💡 Upload data and click **Process Files** (or **Sample Data**) to activate RAG-powered answers.")
+
+
+# ════════════════════════════════════════════════════════════════
+# TAB 3 — DASHBOARD
+# ════════════════════════════════════════════════════════════════
+with tabs[2]:
+    stops_df   = st.session_state.stops_df
+    incidents_ = st.session_state.get("incidents_df")
+
+    if stops_df is None:
+        st.info("👈 Load data to see the dashboard.")
+    else:
+        avg_score   = int(stops_df["score"].mean())
+        safe_cnt    = int((stops_df["tier"]=="safe").sum())
+        caution_cnt = int((stops_df["tier"]=="caution").sum())
+        danger_cnt  = int((stops_df["tier"]=="danger").sum())
+        inc_cnt     = len(incidents_) if incidents_ is not None else 0
+
+        # KPI row
+        st.markdown(f"""
+        <div class="metric-row">
+          <div class="metric-tile"><div class="metric-val">{avg_score}</div><div class="metric-lbl">Network Avg Score</div></div>
+          <div class="metric-tile"><div class="metric-val" style="color:#69f0ae">{safe_cnt}</div><div class="metric-lbl">Safe Stops</div></div>
+          <div class="metric-tile"><div class="metric-val" style="color:#ffab40">{caution_cnt}</div><div class="metric-lbl">Caution Stops</div></div>
+          <div class="metric-tile"><div class="metric-val" style="color:#ff5252">{danger_cnt}</div><div class="metric-lbl">High Risk Stops</div></div>
+          <div class="metric-tile"><div class="metric-val" style="color:#ce93d8">{inc_cnt}</div><div class="metric-lbl">Incidents Logged</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        dcol1, dcol2 = st.columns(2)
+
+        with dcol1:
+            st.markdown("**Safety Score Distribution by Zone**")
+            if "zone" in stops_df.columns:
+                zone_df = stops_df.groupby("zone")["score"].mean().reset_index()
+                zone_df.columns = ["Zone","Avg Safety Score"]
+                zone_df = zone_df.sort_values("Avg Safety Score", ascending=False)
+                st.bar_chart(zone_df.set_index("Zone"), color="#4fc3f7")
+
+            st.markdown("**Priority Stops (Lowest Safety Scores)**")
+            worst = stops_df.nsmallest(6, "score")[["stop_name","zone","score","tier"]].copy()
+            worst["tier"] = worst["tier"].apply(lambda t: t.upper())
+            st.dataframe(worst, use_container_width=True, hide_index=True)
+
+        with dcol2:
+            st.markdown("**Tonight's Incidents**")
+            if incidents_ is not None and not incidents_.empty:
+                disp = incidents_.copy()
+                if "stop_id" in disp.columns and stops_df is not None:
+                    id_to_name = dict(zip(stops_df["stop_id"], stops_df["stop_name"]))
+                    disp["stop_name"] = disp["stop_id"].map(id_to_name).fillna(disp["stop_id"])
+                cols_show = [c for c in ["time_reported","incident_type","severity","stop_name","description"] if c in disp.columns]
+                st.dataframe(disp[cols_show], use_container_width=True, hide_index=True)
+            else:
+                st.info("No incident data loaded.")
+
+            st.markdown("**Safety Factor Breakdown (Top 8 Stops)**")
+            top8 = stops_df.nlargest(8,"score")[["stop_name","lighting_score","footfall_score","cctv_score","score"]].copy()
+            top8.columns = ["Stop","Lighting","Footfall","CCTV","Total"]
+            st.dataframe(top8, use_container_width=True, hide_index=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# TAB 4 — DATA EXPLORER
+# ════════════════════════════════════════════════════════════════
+with tabs[3]:
+    st.markdown("#### 🗄 Raw Data Explorer")
+    stops_df  = st.session_state.stops_df
+    routes_df = st.session_state.routes_df
+    inc_df    = st.session_state.get("incidents_df")
+
+    if stops_df is None:
+        st.info("No data loaded. Use the sidebar to upload files or load sample data.")
+    else:
+        exp_tabs = st.tabs(["Stops & Scores", "Routes", "Incidents"])
+
+        with exp_tabs[0]:
+            display_cols = [c for c in ["stop_id","stop_name","zone","score","tier","lighting_score",
+                                         "footfall_score","cctv_score","incident_count","isolation_score",
+                                         "emergency_access","latitude","longitude"] if c in stops_df.columns]
+            st.dataframe(stops_df[display_cols], use_container_width=True, hide_index=True)
+            st.download_button("⬇ Download Stops CSV", stops_df.to_csv(index=False), "saferoute_stops.csv", "text/csv")
+
+        with exp_tabs[1]:
+            if routes_df is not None and not routes_df.empty:
+                st.dataframe(routes_df, use_container_width=True, hide_index=True)
+                st.download_button("⬇ Download Routes CSV", routes_df.to_csv(index=False), "saferoute_routes.csv", "text/csv")
+            else:
+                st.info("No route data available.")
+
+        with exp_tabs[2]:
+            if inc_df is not None and not inc_df.empty:
+                st.dataframe(inc_df, use_container_width=True, hide_index=True)
+                st.download_button("⬇ Download Incidents CSV", inc_df.to_csv(index=False), "saferoute_incidents.csv", "text/csv")
+            else:
+                st.info("No incident data available.")
